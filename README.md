@@ -1,5 +1,7 @@
 # recall — search everywhere your agent's knowledge lives
 
+[![ci](https://github.com/gujing-hub/agent-memory-recall/actions/workflows/ci.yml/badge.svg)](https://github.com/gujing-hub/agent-memory-recall/actions/workflows/ci.yml)
+
 A single read-only command that searches **all five places** a long-running agent's knowledge ends up, so that "what did we do last time?" (and "we don't have X") is answered by looking it up instead of remembering.
 
 ```bash
@@ -34,11 +36,19 @@ People (and agents) routinely search **one** of them and then speak as if they h
 
 ## Install
 
-No dependencies beyond the Python standard library. Just copy the file:
+No dependencies beyond the Python standard library (3.9+). Either:
 
 ```bash
-cp recall.py ~/bin/recall.py && chmod +x ~/bin/recall.py
+# one-liner: drop it somewhere on your PATH
+curl -fsSL https://raw.githubusercontent.com/gujing-hub/agent-memory-recall/main/recall.py \
+  -o ~/.local/bin/recall.py && chmod +x ~/.local/bin/recall.py
+
+# or from a clone
+git clone https://github.com/gujing-hub/agent-memory-recall && cd agent-memory-recall
+cp recall.py ~/.local/bin/recall.py && chmod +x ~/.local/bin/recall.py
 ```
+
+Tests: `python -m unittest discover -s tests -v` (no deps, runs in under a second).
 
 It uses [ripgrep](https://github.com/BurntSushi/ripgrep) when it can find one (including the copy Hermes ships under `~/.hermes/tools/ripgrep-*/rg`), and falls back to a pure-Python search otherwise.
 
