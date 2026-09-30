@@ -40,6 +40,32 @@ import time
 
 SNIPPET = 220
 SKIP_DIRS = {"node_modules", ".venv", "venv", "__pycache__", ".git", "dist", "build", "cache"}
+# One shared scope for BOTH search backends: whether ripgrep is installed must not
+# change which files are searched.
+TEXT_SUFFIXES = (".md", ".txt", ".json", ".yaml", ".yml", ".html", ".htm")
+
+_ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])")
+_CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def sanitize(s: str) -> str:
+    """Strip ANSI/OSC escapes and control characters before printing.
+
+    Retrieved content is untrusted input: a note, a session message or a filename can
+    carry terminal escape sequences that forge or hide output (and some terminals act
+    on OSC sequences). `\\s+` collapsing does not remove ESC.
+    """
+    return _CTRL.sub("", _ANSI.sub("", s or ""))
+
+
+def pos_int(v: str) -> int:
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("must be an integer")
+    if n < 1:
+        raise argparse.ArgumentTypeError("must be >= 1")
+    return n
 
 
 def default_home() -> pathlib.Path:
@@ -85,10 +111,11 @@ def search_sessions(db: pathlib.Path, q: str, limit: int, days: int | None):
             except sqlite3.Error as e:
                 note, rows = f"FTS failed ({e}), falling back to LIKE", []
         if not rows:
+            like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
             rows = cur.execute(
                 f"""select session_id, timestamp, role, content from messages m
-                    where content like ? {where} order by timestamp desc limit ?""",
-                (f"%{q}%", limit),
+                    where content like ? escape '\\' {where} order by timestamp desc limit ?""",
+                (like, limit),
             ).fetchall()
             note = note or "LIKE"
     except sqlite3.Error as e:
@@ -117,11 +144,19 @@ def search_dir(q: str, root: pathlib.Path, limit: int, rg: str | None):
     if not root.exists():
         return []
     if rg:
+        globs: list[str] = []
+        for s in TEXT_SUFFIXES:
+            globs += ["--glob", "*" + s]
+        for d in sorted(SKIP_DIRS):
+            # '!**/name/**' — a bare '!name/**' only matches at the search root, so a
+            # nested node_modules/ would still be searched (verified against rg 15.2).
+            globs += ["--glob", "!**/" + d + "/**"]
         try:
             r = subprocess.run(
                 [rg, "--no-heading", "--line-number", "--color", "never",
-                 "--max-count", str(max(1, limit)), "--max-columns", "400",
-                 "--max-columns-preview", "-i", "--", q, str(root)],
+                 "--fixed-strings", "--max-count", str(max(1, limit)),
+                 "--max-columns", "400", "--max-columns-preview", "-i"]
+                + globs + ["--", q, str(root)],
                 capture_output=True, text=True, timeout=60,
             )
         except Exception:
@@ -132,18 +167,19 @@ def search_dir(q: str, root: pathlib.Path, limit: int, rg: str | None):
             if len(parts) < 3:
                 continue
             f, ln, text = parts
-            hits.append((f, ln, re.sub(r"\s+", " ", text)[:SNIPPET]))
+            hits.append((sanitize(f), ln, sanitize(re.sub(r"\s+", " ", text))[:SNIPPET]))
         return hits[:limit]
     hits: list[tuple[str, str, str]] = []
     for p in root.rglob("*"):
-        if not p.is_file() or p.suffix.lower() not in {".md", ".txt", ".json", ".yaml", ".yml"}:
+        if not p.is_file() or p.suffix.lower() not in TEXT_SUFFIXES:
             continue
         if any(part in SKIP_DIRS for part in p.parts):
             continue
         try:
             for i, line in enumerate(p.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
                 if q.lower() in line.lower():
-                    hits.append((str(p), str(i), re.sub(r"\s+", " ", line)[:SNIPPET]))
+                    hits.append((sanitize(str(p)), str(i),
+                                 sanitize(re.sub(r"\s+", " ", line))[:SNIPPET]))
                     break
         except Exception:
             continue
@@ -155,8 +191,8 @@ def search_dir(q: str, root: pathlib.Path, limit: int, rg: str | None):
 def main() -> int:
     ap = argparse.ArgumentParser(description="search every place an agent's knowledge lives (read-only)")
     ap.add_argument("query")
-    ap.add_argument("-n", "--limit", type=int, default=5, help="max hits per location (default 5)")
-    ap.add_argument("--days", type=int, default=None, help="only look back N days of conversation history")
+    ap.add_argument("-n", "--limit", type=pos_int, default=5, help="max hits per location (default 5)")
+    ap.add_argument("--days", type=pos_int, default=None, help="only look back N days of conversation history")
     ap.add_argument("--home", default=None, help="agent home (default $HERMES_HOME or ~/.hermes)")
     ap.add_argument("--roots", default=None, help="comma-separated extra/override directories to search")
     ap.add_argument("--files-only", action="store_true")
@@ -176,18 +212,22 @@ def main() -> int:
         rows, note = search_sessions(home / "state.db", q, a.limit, a.days)
         print(f"── conversation history ({note})" + (f" → {len(rows)}" if rows else " → none"))
         for when, sid, role, body in rows:
-            print(f"   [{when}] {sid[:24]} ({role}) {body}")
+            print(sanitize(f"   [{when}] {sid[:24]} ({role}) {body}"))
         if not rows:
             print("   (nothing found — do NOT turn this into 'it never happened')")
 
     if not a.sessions_only:
         if a.roots:
-            targets = [(p, pathlib.Path(p).expanduser()) for p in a.roots.split(",") if p.strip()]
+            targets = []
+            for p in a.roots.split(","):
+                p = p.strip()              # strip BEFORE building the path, not only to filter
+                if p:
+                    targets.append((p, pathlib.Path(p).expanduser()))
         else:
             targets = [(n, home / n) for n in ("notes", "wiki", "memories", "skills")]
         for label, d in targets:
             hits = search_dir(q, d, a.limit, rg)
-            print(f"── {label}" + (f" → {len(hits)}" if hits else " → none"))
+            print(f"── {sanitize(label)}" + (f" → {len(hits)}" if hits else " → none"))
             for f, ln, text in hits:
                 print(f"   {f}:{ln}  {text}")
 

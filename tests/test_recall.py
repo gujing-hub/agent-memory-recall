@@ -109,5 +109,57 @@ class RecallTests(unittest.TestCase):
         self.assertIn("x.md", r.stdout)
 
 
+    # ── regressions found by an external review, verified by hand first ───
+    def test_strips_terminal_escape_sequences_from_output(self):
+        (self.home / "notes" / "evil.md").write_text(
+            "SAFE \x1b[31mRED\x1b[0m \x1b]8;;http://evil.example\x07link\x1b]8;;\x07 tail\n",
+            encoding="utf-8")
+        r = run(["SAFE", "--home", str(self.home), "--files-only"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("evil.md", r.stdout)
+        self.assertNotIn("\x1b", r.stdout, "raw ESC must never reach the terminal")
+
+    def test_query_is_matched_literally_not_as_regex_or_wildcard(self):
+        (self.home / "notes" / "lit.md").write_text("aXb a.b\n", encoding="utf-8")
+        # '.' must be literal: "a.b" hits, and it must not behave like a regex 'a.b'
+        r = run(["a.b", "--home", str(self.home), "--files-only"])
+        self.assertIn("lit.md", r.stdout)
+        # a bare wildcard query must not match everything
+        r2 = run(["%", "--home", str(self.home), "--files-only"])
+        self.assertIn("none", r2.stdout, "'%' must be a literal percent, not a LIKE wildcard")
+
+    def test_html_and_htm_files_are_searched(self):
+        (self.home / "notes" / "page.html").write_text(
+            "<p>ZEBRAQUARTZ in html</p>\n", encoding="utf-8")
+        (self.home / "notes" / "old.htm").write_text(
+            "ZEBRAQUARTZ in htm\n", encoding="utf-8")
+        r = run(["ZEBRAQUARTZ", "--home", str(self.home), "--files-only"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("page.html", r.stdout)
+        self.assertIn("old.htm", r.stdout)
+
+    def test_skipped_dirs_stay_skipped(self):
+        deep = self.home / "notes" / "node_modules" / "pkg"
+        deep.mkdir(parents=True)
+        (deep / "index.md").write_text("ZEBRAQUARTZ vendored\n", encoding="utf-8")
+        r = run(["ZEBRAQUARTZ", "--home", str(self.home), "--files-only"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("node_modules", r.stdout)
+
+    def test_non_positive_limit_is_rejected(self):
+        for bad in ("-1", "0"):
+            r = run(["ZEBRAQUARTZ", "--home", str(self.home), "-n", bad])
+            self.assertEqual(r.returncode, 2, "-n %s must be rejected" % bad)
+
+    def test_roots_are_stripped_before_use(self):
+        second = pathlib.Path(self._tmp.name) / "second"
+        second.mkdir()
+        (second / "y.md").write_text("ZEBRAQUARTZ in second root\n", encoding="utf-8")
+        spaced = "%s, %s" % (self.home / "notes", second)   # note the space after the comma
+        r = run(["ZEBRAQUARTZ", "--home", str(self.home), "--files-only", "--roots", spaced])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("y.md", r.stdout, "roots must be stripped before building the path")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
