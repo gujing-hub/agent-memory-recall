@@ -32,7 +32,9 @@ Knowledge in a long-running agent lives in at least five places:
 | 4 | Procedures / skills | `skills/**/SKILL.md` |
 | 5 | Delivered artifacts | output directories |
 
-People (and agents) routinely search **one** of them and then speak as if they had checked everything. This script makes checking everything cheap enough that there's no excuse — 0.5s, no dependencies.
+People (and agents) routinely search **one** of them and then speak as if they had checked everything. This script makes checking everything cheap enough that there's no excuse — one command, standard library only.
+
+**Path assumptions.** By default it reads Hermes Agent's layout (`$HERMES_HOME`, else `~/.hermes`). Other agent frameworks work by pointing it at their own directories: `--home P` for a root that matches this layout, or `--roots a,b,c` for an arbitrary set of directories to scan instead. The conversation-store lookup is the one part that assumes a layout, and it degrades to "none" rather than erroring when it does not apply.
 
 ## Install
 
@@ -75,7 +77,7 @@ A search tool alone doesn't fix anything — the discipline does:
 
 1. **A hit is a lead, not a conclusion.** The output gives you `file:line`; open it and check before you state anything as fact.
 2. **"Nothing found" ≠ "it never happened."** Say *"I searched these five places and found nothing"* — that is checkable. *"We don't have X"* is an assertion, and it's the one that gets you burned.
-3. **Before concluding "this is a gap," search specifically for counter-evidence.** Looking for support after you've decided something is a good insight is confirmation bias; a command that costs 0.5s removes the excuse.
+3. **Before concluding "this is a gap," search specifically for counter-evidence.** Looking for support after you've decided something is a good insight is confirmation bias; a command this cheap removes the excuse.
 
 These fall out of a longer write-up on memory governance (hot-layer authoring rules, verifying that "moved to file X" claims are actually true, and treating memory changes as measurable): see `ARTICLE.md` in this repo, or the same content under the agent's own notes.
 
