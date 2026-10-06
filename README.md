@@ -64,6 +64,7 @@ recall.py "query" --files-only          # skip the conversation store
 recall.py "query" --home /path/to/.hermes
 recall.py "query" --roots ~/notes,~/wiki   # search your own directories instead
 recall.py "query" --scope work          # only inside the scopes you are acting in
+recall.py "query" --session <id>        # drop one session (e.g. the one you are in)
 recall.py --scopes                      # show the resolved scope map
 ```
 
@@ -82,7 +83,10 @@ Declare ownership in a JSON file (default `<home>/notes/recall-scopes.json`):
 }
 ```
 
-- `dirs` are matched as path prefixes relative to `--home`; `hints` match a file's own name.
+- `dirs` are matched as path prefixes (home-relative, `~`-relative or absolute) and
+  `hints` match a file's own name. The file may also carry `"roots": [...]` to change the
+  default search roots — a machine that keeps its projects and deliverables outside the
+  agent home needs absolute entries there.
 - A hot-memory entry may start with a tag — `[[work]]` or `〔work〕` — in which case it
   belongs to that scope. **Entries with no tag are shared** and visible everywhere.
 - `--scope work` then makes files and entries owned by *other* scopes **invisible**
