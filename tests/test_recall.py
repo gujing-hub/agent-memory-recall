@@ -192,7 +192,7 @@ class ScopeTests(unittest.TestCase):
     def test_no_scopes_configured_is_not_an_error(self):
         r = run(["--scopes", "--home", str(self.home / "nowhere")])
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("none configured", r.stdout)
+        self.assertIn("no scopes configured", r.stdout)
 
     def test_scopes_map_is_printed(self):
         r = run(["--scopes", "--home", str(self.home)])
@@ -241,6 +241,34 @@ class ScopeTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("said in a session", r.stdout,
                       "the raw record is never filtered — filtering it would hide evidence")
+
+    def test_session_flag_excludes_that_session(self):
+        con = sqlite3.connect(str(self.home / "state.db"))
+        con.execute("create table messages (session_id text, timestamp real, role text, content text)")
+        con.execute("insert into messages values (?, ?, ?, ?)",
+                    ("mine", time.time(), "user", "ZEBRAQUARTZ in my own session"))
+        con.execute("insert into messages values (?, ?, ?, ?)",
+                    ("theirs", time.time(), "user", "ZEBRAQUARTZ in another session"))
+        con.commit()
+        con.close()
+        r = run(["ZEBRAQUARTZ", "--home", str(self.home), "--sessions-only", "--session", "mine"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("another session", r.stdout)
+        self.assertNotIn("my own session", r.stdout, "--session must drop that session's rows")
+
+    def test_scopes_file_can_override_the_default_search_roots(self):
+        extra = self.home / "delivered"
+        extra.mkdir()
+        (extra / "out.md").write_text("ZEBRAQUARTZ delivered\n", encoding="utf-8")
+        (self.home / "notes" / "recall-scopes.json").write_text(json.dumps({
+            "roots": ["notes", "delivered"],
+            "scopes": {"acme": {"dirs": ["notes/acme"], "hints": ["acme"]}},
+        }), encoding="utf-8")
+        r = run(["ZEBRAQUARTZ", "--home", str(self.home), "--files-only"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("out.md", r.stdout, "roots from the scopes file must be searched")
+        r2 = run(["--scopes", "--home", str(self.home)])
+        self.assertIn("delivered", r2.stdout)
 
 
 if __name__ == "__main__":

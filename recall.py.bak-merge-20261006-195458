@@ -18,7 +18,6 @@ answer can be checked against the source, not remembered.
   python3 recall.py "some query" [-n 5] [--days 90] [--files-only|--sessions-only]
   python3 recall.py "some query" --home ~/.hermes --roots ~/notes,~/wiki
   python3 recall.py "some query" --scope work         # only in the scopes you can act in
-  python3 recall.py "some query" --session <id>       # drop one session from the results
   python3 recall.py --scopes                          # show the resolved scope map
 
 Scopes (optional). Once one agent works on more than one project, a single flat memory
@@ -100,25 +99,20 @@ def default_home() -> pathlib.Path:
 
 
 # ─────────────────────────────── scopes ───────────────────────────────
-def load_config(path: pathlib.Path) -> dict:
-    """Read the scope map and the optional default search roots.
-
-    A missing file is normal (no scopes configured, default roots). The file is either
-    `{"roots": [...], "scopes": {name: {...}}}` or a bare `{name: {...}}`.
-    """
-    empty = {"scopes": {}, "roots": []}
+def load_scopes(path: pathlib.Path) -> dict:
+    """Read the scope map. A missing file is normal (no scopes configured)."""
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return empty
+        return {}
     except (OSError, ValueError) as e:
         print(sanitize(f"warning: ignoring unreadable scopes file {path}: {e}"))
-        return empty
+        return {}
     if not isinstance(raw, dict):
-        return empty
+        return {}
     body = raw.get("scopes")
     if not isinstance(body, dict):
-        body = dict((k, v) for k, v in raw.items() if k != "roots")
+        body = raw
     out: dict = {}
     for name, conf in body.items():
         if not isinstance(conf, dict):
@@ -130,8 +124,7 @@ def load_config(path: pathlib.Path) -> dict:
             "dirs": [str(x).rstrip("/") for x in dirs if isinstance(x, (str, bytes))],
             "hints": [str(x) for x in hints if isinstance(x, (str, bytes))],
         }
-    roots = [str(x).strip() for x in (raw.get("roots") or []) if isinstance(x, (str, bytes))]
-    return {"scopes": out, "roots": [r for r in roots if r]}
+    return out
 
 
 def parse_scope_arg(spec, scopes: dict):
@@ -150,28 +143,17 @@ def parse_scope_arg(spec, scopes: dict):
 
 
 def owner_of(path_str: str, home: pathlib.Path, scopes: dict):
-    """Which scope owns this path — by directory prefix, else by filename hint.
-
-    `dirs` may be written home-relative (`notes/acme`), `~`-relative or absolute
-    (`~/Projects/acme`) — a machine keeping its projects outside the agent home needs
-    the latter.
-    """
-    abs_p = path_str if path_str.startswith("/") else str(home / path_str)
+    """Which scope owns this path — by directory prefix, else by filename hint."""
+    rel = path_str
     try:
-        rel = str(pathlib.Path(abs_p).relative_to(home))
-    except ValueError:
-        rel = None
-    name = abs_p.rsplit("/", 1)[-1].lower()
+        rel = str(pathlib.Path(path_str).relative_to(home))
+    except (ValueError, OSError):
+        pass
+    name = rel.rsplit("/", 1)[-1].lower()
     for scope, conf in scopes.items():
         for d in conf["dirs"]:
-            dd = str(pathlib.Path(d).expanduser()) if d[:1] in ("~", "/") else d
-            if dd.startswith("/"):
-                if abs_p == dd or abs_p.startswith(dd.rstrip("/") + "/"):
-                    return scope
-            else:
-                for cand in (rel, path_str):
-                    if cand and (cand == dd or cand.startswith(dd.rstrip("/") + "/")):
-                        return scope
+            if rel == d or rel.startswith(d + "/"):
+                return scope
         for h in conf["hints"]:
             if h.lower() in name:
                 return scope
@@ -222,11 +204,10 @@ def search_memories(home: pathlib.Path, q: str, limit: int, keep):
     return hits[:limit], hidden
 
 
-def print_scopes(home: pathlib.Path, scopes: dict, path: pathlib.Path, roots=()) -> None:
+def print_scopes(home: pathlib.Path, scopes: dict, path: pathlib.Path) -> None:
     print(sanitize(f"scopes file: {path}"))
-    print(sanitize(f"search roots: {', '.join(roots) if roots else 'notes, wiki, memories, skills (default)'}"))
     if not scopes:
-        print("  (no scopes configured — every path and entry is shared)")
+        print("  (none configured — every path and entry is shared)")
         return
     for name, conf in scopes.items():
         print(sanitize("  %-12s %-14s dirs=%s hints=%s"
@@ -241,7 +222,7 @@ def fts_ok(q: str) -> bool:
     return bool(latin) or len(cjk) >= 3
 
 
-def search_sessions(db: pathlib.Path, q: str, limit: int, days: int | None, exclude: str | None = None):
+def search_sessions(db: pathlib.Path, q: str, limit: int, days: int | None):
     if not db.exists():
         return [], "no session store"
     try:
@@ -282,8 +263,6 @@ def search_sessions(db: pathlib.Path, q: str, limit: int, days: int | None, excl
         con.close()
     out = []
     for sid, ts, role, content in rows:
-        if exclude and sid == exclude:
-            continue
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)) if ts else "?"
         body = re.sub(r"\s+", " ", (content or "")).strip()
         out.append((when, sid, role, body[:SNIPPET]))
@@ -359,8 +338,6 @@ def main() -> int:
     ap.add_argument("--scopes-file", default=None,
                     help="scope map JSON (default <home>/notes/recall-scopes.json)")
     ap.add_argument("--scopes", action="store_true", help="print the resolved scope map and exit")
-    ap.add_argument("--session", default=None,
-                    help="exclude one session id from the conversation results")
     ap.add_argument("--files-only", action="store_true")
     ap.add_argument("--sessions-only", action="store_true")
     a = ap.parse_args()
@@ -368,11 +345,10 @@ def main() -> int:
     home = pathlib.Path(a.home).expanduser() if a.home else default_home()
     scopes_file = (pathlib.Path(a.scopes_file).expanduser() if a.scopes_file
                    else home / "notes" / "recall-scopes.json")
-    config = load_config(scopes_file)
-    scopes, cfg_roots = config["scopes"], config["roots"]
+    scopes = load_scopes(scopes_file)
 
     if a.scopes:
-        print_scopes(home, scopes, scopes_file, cfg_roots)
+        print_scopes(home, scopes, scopes_file)
         return 0
     if not a.query:
         print("give me a query (or --scopes to show the scope map)")
@@ -390,7 +366,7 @@ def main() -> int:
                        % ", ".join(scopes[s]["label"] for s in keep)))
 
     if not a.files_only:
-        rows, note = search_sessions(home / "state.db", q, a.limit, a.days, a.session)
+        rows, note = search_sessions(home / "state.db", q, a.limit, a.days)
         print(sanitize(f"── conversation history ({note})") + (f" → {len(rows)}" if rows else " → none"))
         for when, sid, role, body in rows:
             print(sanitize(f"   [{when}] {sid[:24]} ({role}) {body}"))
@@ -405,11 +381,7 @@ def main() -> int:
                 if p:
                     targets.append((p, pathlib.Path(p).expanduser()))
         else:
-            names = cfg_roots or ["notes", "wiki", "memories", "skills"]
-            targets = []
-            for n in names:
-                p = pathlib.Path(n).expanduser()
-                targets.append((n, p if p.is_absolute() else home / n))
+            targets = [(n, home / n) for n in ("notes", "wiki", "memories", "skills")]
         for label, d in targets:
             if label == "memories":
                 hits, hidden = search_memories(home, q, a.limit, keep)
