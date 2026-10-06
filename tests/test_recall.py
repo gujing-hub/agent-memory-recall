@@ -7,6 +7,7 @@ conversation store) and drives the real script as a subprocess, so the tests
 exercise the same code path a user does.
 """
 
+import json
 import pathlib
 import sqlite3
 import subprocess
@@ -159,6 +160,87 @@ class RecallTests(unittest.TestCase):
         r = run(["ZEBRAQUARTZ", "--home", str(self.home), "--files-only", "--roots", spaced])
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("y.md", r.stdout, "roots must be stripped before building the path")
+
+
+class ScopeTests(unittest.TestCase):
+    """Scopes: an entry or file owned by another scope must be invisible, not ranked lower."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.home = pathlib.Path(self._tmp.name) / "agent-home"
+        for sub in ("notes", "memories", "notes/acme", "notes/other"):
+            (self.home / sub).mkdir(parents=True, exist_ok=True)
+        # memory: one per-scope entry (tagged) + one shared (untagged)
+        (self.home / "memories" / "MEMORY.md").write_text(
+            "[[acme]] ACMEONLY is the acme token\n"
+            "\u00a7\n"
+            "[[other]] OTHERONLY is the other token\n"
+            "\u00a7\n"
+            "SHAREDTOKEN applies to everything\n",
+            encoding="utf-8")
+        (self.home / "notes" / "acme" / "a.md").write_text("ACMEONLY zed\n", encoding="utf-8")
+        (self.home / "notes" / "other" / "b.md").write_text("OTHERONLY zed\n", encoding="utf-8")
+        (self.home / "notes" / "shared.md").write_text("SHAREDTOKEN zed\n", encoding="utf-8")
+        (self.home / "notes" / "recall-scopes.json").write_text(json.dumps({
+            "acme": {"label": "Acme", "dirs": ["notes/acme"], "hints": ["acme"]},
+            "other": {"label": "Other", "dirs": ["notes/other"], "hints": ["other"]},
+        }), encoding="utf-8")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_no_scopes_configured_is_not_an_error(self):
+        r = run(["--scopes", "--home", str(self.home / "nowhere")])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("none configured", r.stdout)
+
+    def test_scopes_map_is_printed(self):
+        r = run(["--scopes", "--home", str(self.home)])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("acme", r.stdout)
+        self.assertIn("notes/acme", r.stdout)
+
+    def test_without_scope_everything_is_visible(self):
+        r = run(["zed", "--home", str(self.home), "--files-only"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("a.md", r.stdout)
+        self.assertIn("b.md", r.stdout)
+
+    def test_scope_hides_files_owned_by_other_scopes(self):
+        r = run(["zed", "--home", str(self.home), "--files-only", "--scope", "acme"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("a.md", r.stdout)
+        self.assertIn("shared.md", r.stdout, "shared files stay visible in every scope")
+        self.assertNotIn("b.md", r.stdout, "another scope's file must be invisible")
+
+    def test_scope_hides_tagged_memory_entries_but_keeps_shared_ones(self):
+        r = run(["ONLY", "--home", str(self.home), "--files-only", "--scope", "acme"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("ACMEONLY", r.stdout)
+        self.assertNotIn("OTHERONLY", r.stdout, "another scope's entry must be invisible")
+        self.assertIn("hidden by scope", r.stdout, "the count of hidden entries is reported")
+
+    def test_untagged_memory_entry_is_visible_in_every_scope(self):
+        r = run(["SHAREDTOKEN", "--home", str(self.home), "--files-only", "--scope", "acme"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("SHAREDTOKEN", r.stdout)
+
+    def test_unknown_scope_fails_loudly(self):
+        r = run(["zed", "--home", str(self.home), "--scope", "nosuch"])
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("unknown scope", r.stdout)
+
+    def test_conversation_history_is_never_scope_filtered(self):
+        con = sqlite3.connect(str(self.home / "state.db"))
+        con.execute("create table messages (session_id text, timestamp real, role text, content text)")
+        con.execute("insert into messages values (?, ?, ?, ?)",
+                    ("s", time.time(), "user", "OTHERONLY said in a session"))
+        con.commit()
+        con.close()
+        r = run(["OTHERONLY", "--home", str(self.home), "--sessions-only", "--scope", "acme"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("said in a session", r.stdout,
+                      "the raw record is never filtered — filtering it would hide evidence")
 
 
 if __name__ == "__main__":

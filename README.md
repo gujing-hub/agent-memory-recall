@@ -63,7 +63,39 @@ recall.py "query" --days 30             # only the last 30 days of conversation 
 recall.py "query" --files-only          # skip the conversation store
 recall.py "query" --home /path/to/.hermes
 recall.py "query" --roots ~/notes,~/wiki   # search your own directories instead
+recall.py "query" --scope work          # only inside the scopes you are acting in
+recall.py --scopes                      # show the resolved scope map
 ```
+
+## Scopes: stop one project's memory from answering for another
+
+A single flat memory works until the agent runs more than one project. Then the wrong
+project's constraints come back as if they applied here — and nothing in the output says
+so. Scopes make "this only applies to X" mechanical instead of aspirational.
+
+Declare ownership in a JSON file (default `<home>/notes/recall-scopes.json`):
+
+```json
+{
+  "work":     {"label": "Work",  "dirs": ["Projects/acme"], "hints": ["acme"]},
+  "personal": {"label": "Personal"}
+}
+```
+
+- `dirs` are matched as path prefixes relative to `--home`; `hints` match a file's own name.
+- A hot-memory entry may start with a tag — `[[work]]` or `〔work〕` — in which case it
+  belongs to that scope. **Entries with no tag are shared** and visible everywhere.
+- `--scope work` then makes files and entries owned by *other* scopes **invisible**
+  (not merely ranked lower — a lower rank still leaks the content). The hidden entry
+  count is reported so the filtering is auditable.
+
+Two deliberate limits:
+
+- **Conversation history is never scope-filtered.** It is the raw record; filtering it
+  would hide evidence. Scopes narrow what the agent treats as "its own context", not
+  what actually happened.
+- **No scopes file, no `--scope` ⇒ nothing changes.** The feature is opt-in and silent
+  when unconfigured.
 
 ## Two implementation details worth knowing
 
