@@ -484,6 +484,17 @@ def main() -> int:
             for n in names:
                 p = pathlib.Path(n).expanduser()
                 targets.append((n, p if p.is_absolute() else home / n))
+            # `--scope X` also searches X's own directories. A scope may own a tree
+            # the default roots never touch (a books/ folder outside the agent home,
+            # say) — that is exactly when you want to look there. Without --scope
+            # those trees stay out of the way.
+            for s in keep:
+                for d in scopes.get(s, {}).get("dirs", []):
+                    dp = pathlib.Path(d).expanduser()
+                    if not dp.is_absolute():
+                        dp = home / dp
+                    if not any(str(dp) == str(t[1]) for t in targets):
+                        targets.append((d, dp))
         for label, d in targets:
             if label == "memories":
                 hits, hidden = search_memories(home, q, a.limit, keep)

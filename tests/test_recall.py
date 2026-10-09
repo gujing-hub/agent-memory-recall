@@ -213,6 +213,26 @@ class ScopeTests(unittest.TestCase):
         self.assertIn("shared.md", r.stdout, "shared files stay visible in every scope")
         self.assertNotIn("b.md", r.stdout, "another scope's file must be invisible")
 
+    def test_scope_also_searches_its_own_directories(self):
+        """A scope may own a tree outside the default roots; --scope looks inside it.
+
+        Without this, a scope pointing at (say) a books/ folder outside the agent
+        home could never return anything, because the default roots never touch it.
+        """
+        outside = pathlib.Path(self._tmp.name) / "outside-books"
+        outside.mkdir()
+        (outside / "book.md").write_text("UNIQUEBOOKMARKER here\n", encoding="utf-8")
+        scopes_file = self.home / "notes" / "recall-scopes.json"
+        conf = json.loads(scopes_file.read_text(encoding="utf-8"))
+        conf["books"] = {"label": "Books", "dirs": [str(outside)]}
+        scopes_file.write_text(json.dumps(conf), encoding="utf-8")
+
+        r = run(["UNIQUEBOOKMARKER", "--home", str(self.home), "--files-only"])
+        self.assertNotIn("book.md", r.stdout, "an outside tree must not be searched by default")
+        r = run(["UNIQUEBOOKMARKER", "--home", str(self.home), "--files-only", "--scope", "books"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("book.md", r.stdout, "--scope must search the scope's own directories")
+
     def test_scope_hides_tagged_memory_entries_but_keeps_shared_ones(self):
         r = run(["ONLY", "--home", str(self.home), "--files-only", "--scope", "acme"])
         self.assertEqual(r.returncode, 0, r.stderr)
