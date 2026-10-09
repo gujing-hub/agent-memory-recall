@@ -300,9 +300,78 @@ def find_rg(home: pathlib.Path) -> str | None:
     return None
 
 
+def tokenize(q: str) -> list[str]:
+    """Split a query into search terms.
+
+    A single-term query behaves exactly as before (one exact substring match).
+    Multi-term queries used to be matched as one literal string — so
+    "battery buyback port" found nothing at all, because that sentence never
+    appears verbatim. Each term is now searched on its own and hits are ranked
+    by how many terms they cover.
+    """
+    toks = [t for t in re.split(r"\s+", q.strip()) if t]
+    return toks or [q]
+
+
+# Names of archive/index-like files: they match almost anything, so a hit there
+# carries little information and must not crowd out the real answer.
+NOISY_NAME = ("记忆归档", "memory-index", "index.md", "aa-snapshots", ".bak-")
+
+_size_cache: dict[str, int] = {}
+
+
+def _size(path: str) -> int:
+    v = _size_cache.get(path)
+    if v is None:
+        try:
+            v = os.path.getsize(path)
+        except OSError:
+            v = 0
+        _size_cache[path] = v
+    return v
+
+
+def _score_hit(path: str, text: str, tokens: list[str], q: str) -> tuple[float, int]:
+    """Rank a hit; higher wins. Returns (score, terms_covered).
+
+    Terms covered dominates (a file matching every term is the likely answer),
+    then a term appearing in the file name, then a verbatim-phrase bonus.
+    Huge files and archive/index names are pushed down — they match everything.
+    """
+    low, plow = text.lower(), path.lower()
+    base = os.path.basename(plow)
+    covered = sum(1 for t in tokens if t.lower() in low)
+    score = 100.0 * covered
+    if len(tokens) == 1:
+        return score, covered
+    if q.lower() in low:
+        score += 30.0
+    score += 60.0 * sum(1 for t in tokens if t.lower() in plow)
+    score += 20.0 * sum(1 for t in tokens if t.lower() in base)
+    score -= min(40.0, _size(path) / 20480.0)          # −1 per 20 KB, capped at −40
+    if any(n in base for n in NOISY_NAME):
+        score -= 30.0
+    return score, covered
+
+
 def search_dir(q: str, root: pathlib.Path, limit: int, rg: str | None):
     if not root.exists():
         return []
+    tokens = tokenize(q)
+    best: dict[str, tuple[float, int, str, str]] = {}  # path -> (score, covered, line, snippet)
+
+    def consider(f: str, ln: str, text: str) -> None:
+        f = sanitize(f)
+        snip = sanitize(re.sub(r"\s+", " ", text))[:SNIPPET]
+        sc, cov = _score_hit(f, snip, tokens, q)
+        if len(tokens) > 1:
+            # show how much of the query this hit covers — a 1/3 hit is a weak
+            # lead, and saying so beats letting it look like an answer
+            snip = "[%d/%d] %s" % (cov, len(tokens), snip)
+        cur = best.get(f)
+        if cur is None or cov > cur[1] or (cov == cur[1] and sc > cur[0]):
+            best[f] = (sc, cov, ln, snip)
+
     if rg:
         globs: list[str] = []
         for s in TEXT_SUFFIXES:
@@ -311,41 +380,46 @@ def search_dir(q: str, root: pathlib.Path, limit: int, rg: str | None):
             # '!**/name/**' — a bare '!name/**' only matches at the search root, so a
             # nested node_modules/ would still be searched (verified against rg 15.2).
             globs += ["--glob", "!**/" + d + "/**"]
-        try:
-            r = subprocess.run(
-                [rg, "--no-heading", "--line-number", "--color", "never",
-                 "--fixed-strings", "--max-count", str(max(1, limit)),
-                 "--max-columns", "400", "--max-columns-preview", "-i"]
-                + globs + ["--", q, str(root)],
-                capture_output=True, text=True, timeout=60,
-            )
-        except Exception:
-            return []
-        hits = []
-        for line in r.stdout.splitlines():
-            parts = line.split(":", 2)
-            if len(parts) < 3:
+        for tok in tokens:
+            try:
+                r = subprocess.run(
+                    [rg, "--no-heading", "--line-number", "--color", "never",
+                     "--fixed-strings", "--max-count", str(max(2, limit)),
+                     "--max-columns", "400", "--max-columns-preview", "-i"]
+                    + globs + ["--", tok, str(root)],
+                    capture_output=True, text=True, timeout=60,
+                )
+            except Exception:
                 continue
-            f, ln, text = parts
-            hits.append((sanitize(f), ln, sanitize(re.sub(r"\s+", " ", text))[:SNIPPET]))
-        return hits[:limit]
-    hits: list[tuple[str, str, str]] = []
-    for p in root.rglob("*"):
-        if not p.is_file() or p.suffix.lower() not in TEXT_SUFFIXES:
-            continue
-        if any(part in SKIP_DIRS for part in p.parts):
-            continue
-        try:
-            for i, line in enumerate(p.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
-                if q.lower() in line.lower():
-                    hits.append((sanitize(str(p)), str(i),
-                                 sanitize(re.sub(r"\s+", " ", line))[:SNIPPET]))
-                    break
-        except Exception:
-            continue
-        if len(hits) >= limit:
-            break
-    return hits
+            for line in r.stdout.splitlines():
+                parts = line.split(":", 2)
+                if len(parts) >= 3:
+                    consider(parts[0], parts[1], parts[2])
+    else:
+        lows = [t.lower() for t in tokens]
+        for p in root.rglob("*"):
+            if not p.is_file() or p.suffix.lower() not in TEXT_SUFFIXES:
+                continue
+            if any(part in SKIP_DIRS for part in p.parts):
+                continue
+            try:
+                for i, line in enumerate(p.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
+                    if any(t in line.lower() for t in lows):
+                        consider(str(p), str(i), line)
+                        break
+            except Exception:
+                continue
+    # best hit per file, then rank — one file must not fill the whole list
+    ranked = sorted(best.items(), key=lambda kv: (kv[1][1], kv[1][0]), reverse=True)
+    if len(tokens) > 1:
+        # A multi-term query must not degrade into "some single common word matched"
+        # — that floods the answer with noise ("部署"/"流程" match everywhere).
+        # If files covering ≥2 terms exist, show only those; OR is the fallback
+        # for when nothing stronger exists at all.
+        strong = [kv for kv in ranked if kv[1][1] >= 2]
+        if strong:
+            ranked = strong
+    return [(f, v[2], v[3]) for f, v in ranked[:limit]]
 
 
 def main() -> int:
