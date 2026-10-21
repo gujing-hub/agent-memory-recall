@@ -162,6 +162,49 @@ class RecallTests(unittest.TestCase):
         self.assertIn("y.md", r.stdout, "roots must be stripped before building the path")
 
 
+class TieredTests(unittest.TestCase):
+    """--tiered：Skill → trace → world，命中够就短路（借 MemOS 的检索顺序）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.home = pathlib.Path(self._tmp.name) / "agent-home"
+        for sub in ("notes", "memories", "skills/a", "skills/b", "skills/c", "out"):
+            (self.home / sub).mkdir(parents=True, exist_ok=True)
+        for s in ("a", "b", "c"):
+            (self.home / "skills" / s / "SKILL.md").write_text(
+                f"# {s}\n\nZEBRAQUARTZ lives here.\n", encoding="utf-8")
+        (self.home / "notes" / "n.md").write_text(
+            "# notes\n\nNOTESONLY token, no skill mentions it.\n", encoding="utf-8")
+        (self.home / "out" / "deliverable.md").write_text(
+            "# delivery\n\nNOTESONLY shipped last week.\n", encoding="utf-8")
+        con = sqlite3.connect(str(self.home / "state.db"))
+        con.execute("create table messages "
+                    "(session_id text, timestamp real, role text, content text)")
+        con.commit()
+        con.close()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_skill_hits_short_circuit_later_tiers(self):
+        r = run(["ZEBRAQUARTZ", "--home", str(self.home), "--tiered"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("T1 skill", r.stdout)
+        self.assertIn("后面的层级跳过", r.stdout)
+        self.assertNotIn("T3 world", r.stdout)
+
+    def test_falls_through_to_world_when_no_skill_hit(self):
+        r = run(["NOTESONLY", "--home", str(self.home), "--tiered"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("T3 world", r.stdout)
+        self.assertIn("n.md", r.stdout)
+
+    def test_tier_stop_is_configurable(self):
+        r = run(["ZEBRAQUARTZ", "--home", str(self.home), "--tiered", "--tier-stop", "9"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("后面的层级跳过", r.stdout)
+
+
 class ScopeTests(unittest.TestCase):
     """Scopes: an entry or file owned by another scope must be invisible, not ranked lower."""
 

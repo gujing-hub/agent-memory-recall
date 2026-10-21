@@ -422,6 +422,82 @@ def search_dir(q: str, root: pathlib.Path, limit: int, rg: str | None):
     return [(f, v[2], v[3]) for f, v in ranked[:limit]]
 
 
+def collect_targets(home: pathlib.Path, roots, cfg_roots, keep, scopes: dict):
+    """解析要搜的目录：显式 --roots 优先，否则用配置里的 roots（再叠加 scope 自己的目录）。"""
+    if roots:
+        targets = []
+        for p in roots.split(","):
+            p = p.strip()             # strip BEFORE building the path, not only to filter
+            if p:
+                targets.append((p, pathlib.Path(p).expanduser()))
+        return targets
+    names = cfg_roots or ["notes", "wiki", "memories", "skills"]
+    targets = []
+    for n in names:
+        p = pathlib.Path(n).expanduser()
+        targets.append((n, p if p.is_absolute() else home / n))
+    # `--scope X` also searches X's own directories. A scope may own a tree the
+    # default roots never touch (a books/ folder outside the agent home, say).
+    for s in keep:
+        for d in scopes.get(s, {}).get("dirs", []):
+            dp = pathlib.Path(d).expanduser()
+            if not dp.is_absolute():
+                dp = home / dp
+            if not any(str(dp) == str(t[1]) for t in targets):
+                targets.append((d, dp))
+    return targets
+
+
+def run_tiered(home: pathlib.Path, q: str, limit: int, stop: int, rg, keep,
+               scopes: dict, targets: list) -> int:
+    """三级检索：Skill → trace → world model，命中够就停。
+
+    借 MemOS 的顺序而不是它那套架构：先找「已经会做的事」，再找「做过/交付过
+    的东西」，最后才翻知识库。目的是省 token —— 多数接活问题第一级就有答案，
+    不必把五处全扫一遍。`stop` 是每级的短路阈值（默认 3）。
+
+    T2 用的是配置里除 notes/wiki/memories/skills 之外的目录（本机是 ~/hermes产出），
+    没有配就只搜会话历史 —— 不硬编码任何绝对路径，测试环境才不会去翻真实产出。
+    """
+    world_names = {"notes", "wiki", "memories"}
+    t1 = [(n, p) for n, p in targets if n == "skills"]
+    t3 = [(n, p) for n, p in targets if n in world_names]
+    t2_dirs = [(n, p) for n, p in targets if n not in world_names and n != "skills"]
+    tiers = [
+        ("T1 skill 现成能力", t1, False),
+        ("T2 trace 相似经历", t2_dirs, True),
+        ("T3 world 知识", t3, False),
+    ]
+    for name, dirs, with_sessions in tiers:
+        print(sanitize(f"━━ {name}"))
+        found = 0
+        if with_sessions:
+            rows, note = search_sessions(home / "state.db", q, limit, None, None)
+            print(sanitize(f"   会话历史 ({note})") + (f" → {len(rows)}" if rows else " → none"))
+            for when, sid, role, body in rows:
+                # 会话原文常常很长（含系统提示），截断显示，完整内容按 session id 回查
+                short = body if len(body) <= 140 else body[:140] + "…"
+                print(sanitize(f"   [{when}] {sid[:24]} ({role}) {short}"))
+            found += len(rows)
+        for label, d in dirs:
+            if not d.exists():
+                continue
+            if label == "memories":
+                hits, _hidden = search_memories(home, q, limit, keep)
+            else:
+                raw = search_dir(q, d, limit * (3 if keep else 1), rg)
+                hits = scope_filter(raw, home, scopes, keep)[:limit]
+            print(sanitize(f"   {label}") + (f" → {len(hits)}" if hits else " → none"))
+            for f, ln, text in hits:
+                print(f"     {f}:{ln}  {text}")
+            found += len(hits)
+        if found >= stop:
+            print(sanitize(f"   ✓ 命中 {found} 条，后面的层级跳过"
+                           f"（要看全用 --flat 或 -n 调大）"))
+            break
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="search every place an agent's knowledge lives (read-only)")
     ap.add_argument("query", nargs="?")
@@ -437,6 +513,10 @@ def main() -> int:
                     help="exclude one session id from the conversation results")
     ap.add_argument("--files-only", action="store_true")
     ap.add_argument("--sessions-only", action="store_true")
+    ap.add_argument("--tiered", action="store_true",
+                    help="三级检索 Skill → trace → world model，命中够就停（省 token）")
+    ap.add_argument("--tier-stop", type=pos_int, default=3,
+                    help="每级命中多少条就短路（默认 3，仅 --tiered）")
     a = ap.parse_args()
 
     home = pathlib.Path(a.home).expanduser() if a.home else default_home()
@@ -463,6 +543,12 @@ def main() -> int:
         print(sanitize("── scopes: %s (entries/files owned by other scopes are invisible)"
                        % ", ".join(scopes[s]["label"] for s in keep)))
 
+    if a.tiered:
+        tg = collect_targets(home, a.roots, cfg_roots, keep, scopes)
+        run_tiered(home, q, a.limit, a.tier_stop, rg, keep, scopes, tg)
+        print(f"\n({time.time() - t0:.1f}s · read-only; a hit is a lead, not a conclusion)")
+        return 0
+
     if not a.files_only:
         rows, note = search_sessions(home / "state.db", q, a.limit, a.days, a.session)
         print(sanitize(f"── conversation history ({note})") + (f" → {len(rows)}" if rows else " → none"))
@@ -472,29 +558,7 @@ def main() -> int:
             print("   (nothing found — do NOT turn this into 'it never happened')")
 
     if not a.sessions_only:
-        if a.roots:
-            targets = []
-            for p in a.roots.split(","):
-                p = p.strip()              # strip BEFORE building the path, not only to filter
-                if p:
-                    targets.append((p, pathlib.Path(p).expanduser()))
-        else:
-            names = cfg_roots or ["notes", "wiki", "memories", "skills"]
-            targets = []
-            for n in names:
-                p = pathlib.Path(n).expanduser()
-                targets.append((n, p if p.is_absolute() else home / n))
-            # `--scope X` also searches X's own directories. A scope may own a tree
-            # the default roots never touch (a books/ folder outside the agent home,
-            # say) — that is exactly when you want to look there. Without --scope
-            # those trees stay out of the way.
-            for s in keep:
-                for d in scopes.get(s, {}).get("dirs", []):
-                    dp = pathlib.Path(d).expanduser()
-                    if not dp.is_absolute():
-                        dp = home / dp
-                    if not any(str(dp) == str(t[1]) for t in targets):
-                        targets.append((d, dp))
+        targets = collect_targets(home, a.roots, cfg_roots, keep, scopes)
         for label, d in targets:
             if label == "memories":
                 hits, hidden = search_memories(home, q, a.limit, keep)

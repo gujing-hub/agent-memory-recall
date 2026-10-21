@@ -66,7 +66,24 @@ recall.py "query" --roots ~/notes,~/wiki   # search your own directories instead
 recall.py "query" --scope work          # only inside the scopes you are acting in
 recall.py "query" --session <id>        # drop one session (e.g. the one you are in)
 recall.py --scopes                      # show the resolved scope map
+recall.py "query" --tiered              # tiered: Skill → trace → world, stop early
 ```
+
+### `--tiered`: search in the order you actually need things
+
+A flat search hits five places and prints everything. Tiered search asks a different
+question first: **do I already have a procedure for this?**
+
+| Tier | Looks in | Answers |
+|---|---|---|
+| T1 skill | `skills/` | "Have I already learned how to do this?" |
+| T2 trace | `~/hermes产出` + conversation store | "Have I done this before, and what came of it?" |
+| T3 world | `notes/`, `wiki/`, `memories/` | "What do I know about this domain?" |
+
+It stops once a tier returns `--tier-stop` hits (default 3). Measured on five real
+queries in a 90-skill agent: 38–82% fewer output characters than a flat search
+(median ~77%), same first-hit quality. Long session bodies are truncated to 140
+chars in tiered mode — follow the session id for the full text.
 
 ## Scopes: stop one project's memory from answering for another
 
